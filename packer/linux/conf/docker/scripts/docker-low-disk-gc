@@ -8,8 +8,8 @@ fi
 DOCKER_PRUNE_UNTIL=${DOCKER_PRUNE_UNTIL:-1h}
 
 mark_instance_unhealthy() {
-  # cancel any running buildkite builds
-  killall -QUIT buildkite-agent || true
+  # graceful stop: SIGTERM; TimeoutStopSec=0 lets the agent finish the current job
+  systemctl stop buildkite-agent || true
 
   # mark the instance for termination
   echo "Marking instance as unhealthy"

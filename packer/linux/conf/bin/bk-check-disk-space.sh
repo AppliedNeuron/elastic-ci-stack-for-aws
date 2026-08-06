@@ -6,6 +6,14 @@ DISK_MIN_INODES=${DISK_MIN_INODES:-250000}        # docker needs lots
 
 DOCKER_DIR="$(jq -r '."data-root" // "/var/lib/docker"' /etc/docker/daemon.json)"
 
+DISK_MAX_USED_PERCENT=${DISK_MAX_USED_PERCENT:-90}
+disk_used_pct=$(df --output=pcent "$DOCKER_DIR" | tail -n1 | tr -dc '0-9')
+echo "Disk used: ${disk_used_pct}% (cutoff ${DISK_MAX_USED_PERCENT}%)"
+if [[ ${disk_used_pct:-0} -ge $DISK_MAX_USED_PERCENT ]]; then
+  echo "Disk usage ${disk_used_pct}% ≥ ${DISK_MAX_USED_PERCENT}% cutoff 🚨" >&2
+  exit 1
+fi
+
 disk_avail=$(df -k --output=avail "$DOCKER_DIR" | tail -n1)
 
 echo "Disk space free: $(df -k -h --output=avail "$DOCKER_DIR" | tail -n1 | sed -e 's/^[[:space:]]//')"
