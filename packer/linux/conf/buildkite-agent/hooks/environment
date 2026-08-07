@@ -40,13 +40,17 @@ if ! docker ps; then
 fi
 
 echo "Checking disk space"
-if ! /usr/local/bin/bk-check-disk-space.sh; then
+# Job-start hard-fail uses a higher % than docker-low-disk-gc (default 90%).
+# Timer retires the instance at 90%; jobs only exit 1 near-full (default 98%)
+# or on the inode floor — so graceful drain and job fail don't race.
+DISK_JOB_FAIL_MAX_USED_PERCENT=${DISK_JOB_FAIL_MAX_USED_PERCENT:-98}
+if ! DISK_MAX_USED_PERCENT="${DISK_JOB_FAIL_MAX_USED_PERCENT}" /usr/local/bin/bk-check-disk-space.sh; then
   echo "Cleaning up docker resources older than ${DOCKER_PRUNE_UNTIL:-4h}"
   docker image prune --all --force --filter "until=${DOCKER_PRUNE_UNTIL:-4h}"
 
   echo "Checking disk space again"
   # Capture disk space output for potential error logging
-  if ! disk_check_output=$(/usr/local/bin/bk-check-disk-space.sh 2>&1); then
+  if ! disk_check_output=$(DISK_MAX_USED_PERCENT="${DISK_JOB_FAIL_MAX_USED_PERCENT}" /usr/local/bin/bk-check-disk-space.sh 2>&1); then
     echo "--- :warning: Disk health checks failed."
     echo "${disk_check_output}"
 
