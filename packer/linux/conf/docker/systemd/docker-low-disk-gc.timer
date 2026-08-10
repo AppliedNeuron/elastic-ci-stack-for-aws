@@ -4,7 +4,8 @@ Requires=docker-low-disk-gc.service
 
 [Timer]
 Unit=docker-low-disk-gc.service
-OnCalendar=hourly
+OnBootSec=3min
+OnUnitActiveSec=3min
 
 [Install]
 WantedBy=timers.target
