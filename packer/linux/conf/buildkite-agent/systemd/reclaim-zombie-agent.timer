@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically check for zombie buildkite agents
+Requires=reclaim-zombie-agent.service
+
+[Timer]
+Unit=reclaim-zombie-agent.service
+OnBootSec=2min
+OnUnitActiveSec=1min
+
+[Install]
+WantedBy=timers.target

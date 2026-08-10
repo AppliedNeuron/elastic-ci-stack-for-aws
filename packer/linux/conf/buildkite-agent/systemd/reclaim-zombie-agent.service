@@ -1,0 +1,7 @@
+[Unit]
+Description=Reclaim InService instances whose buildkite-agent is dead
+Wants=reclaim-zombie-agent.timer
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/reclaim-zombie-agent
