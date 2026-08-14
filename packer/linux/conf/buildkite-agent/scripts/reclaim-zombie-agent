@@ -22,6 +22,21 @@ on_error() {
 }
 trap 'on_error $LINENO' ERR
 
+require_inservice() {
+  local lifecycle
+  lifecycle=$(
+    aws autoscaling describe-auto-scaling-instances \
+      --instance-ids "${instance_id}" \
+      --region "${region}" \
+      --query "AutoScalingInstances[0].LifecycleState" \
+      --output text
+  )
+  if [[ "${lifecycle}" != "InService" ]]; then
+    echo "reclaim-zombie-agent: LifecycleState=${lifecycle} - no-op"
+    exit 0
+  fi
+}
+
 if systemctl is-active --quiet buildkite-agent; then
   exit 0
 fi
@@ -60,18 +75,9 @@ region=$(
     --location "http://169.254.169.254/latest/meta-data/placement/region"
 )
 
-lifecycle=$(
-  aws autoscaling describe-auto-scaling-instances \
-    --instance-ids "${instance_id}" \
-    --region "${region}" \
-    --query "AutoScalingInstances[0].LifecycleState" \
-    --output text
-)
-
-if [[ "${lifecycle}" != "InService" ]]; then
-  echo "reclaim-zombie-agent: LifecycleState=${lifecycle} - no-op"
-  exit 0
-fi
+# Do not restart (or later mark Unhealthy) if ASG has already started scale-in /
+# warm-pool transition.
+require_inservice
 
 # Agent may have come back between checks
 if systemctl is-active --quiet buildkite-agent; then
@@ -86,11 +92,16 @@ if systemctl restart buildkite-agent; then
     echo "reclaim-zombie-agent: restart restored agent - keeping instance"
     exit 0
   fi
-  echo "reclaim-zombie-agent: restart completed but agent still inactive - marking Unhealthy"
+  echo "reclaim-zombie-agent: restart completed but agent still inactive"
 else
-  echo "reclaim-zombie-agent: restart failed - marking Unhealthy"
+  echo "reclaim-zombie-agent: restart failed"
 fi
 
+# Re-check after restart/grace: DesiredCapacity may have dropped and ASG may be
+# moving this instance to the warm pool — do not mark Unhealthy in that case.
+require_inservice
+
+echo "reclaim-zombie-agent: still InService after failed restart - marking Unhealthy"
 aws autoscaling set-instance-health \
   --instance-id "${instance_id}" \
   --region "${region}" \
