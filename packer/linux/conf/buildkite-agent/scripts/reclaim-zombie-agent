@@ -1,6 +1,7 @@
 #!/bin/bash
 # Reclaim InService instances whose buildkite-agent has been dead long enough
 # that this is not a normal idle -> warm-pool transition.
+# Prefer restarting the agent (keeps local cache) before marking Unhealthy.
 # Fail-safe: any unexpected error exits 0 (no reclaim action).
 
 set -euo pipefail
@@ -9,7 +10,11 @@ if [[ $EUID -eq 0 ]]; then
   exec >>/var/log/elastic-stack.log 2>&1
 fi
 
-DEBOUNCE_SECONDS=${RECLAIM_ZOMBIE_DEBOUNCE_SECONDS:-120}
+# Prefer a longer wait so normal idle → warm-pool transitions (agent stop while
+# still briefly InService) are not mistaken for zombies. A few minutes of queue
+# delay is acceptable vs early restart/Unhealthy.
+DEBOUNCE_SECONDS=${RECLAIM_ZOMBIE_DEBOUNCE_SECONDS:-180}
+RESTART_GRACE_SECONDS=${RECLAIM_ZOMBIE_RESTART_GRACE_SECONDS:-30}
 
 on_error() {
   echo "reclaim-zombie-agent: error on line ${1:-?} - no-op" >&2
@@ -73,7 +78,19 @@ if systemctl is-active --quiet buildkite-agent; then
   exit 0
 fi
 
-echo "reclaim-zombie-agent: agent inactive ${inactive_for}s and InService - marking Unhealthy"
+echo "reclaim-zombie-agent: agent inactive ${inactive_for}s and InService - attempting restart"
+# Conditional so a failed restart does not trip the ERR fail-safe no-op.
+if systemctl restart buildkite-agent; then
+  sleep "${RESTART_GRACE_SECONDS}"
+  if systemctl is-active --quiet buildkite-agent; then
+    echo "reclaim-zombie-agent: restart restored agent - keeping instance"
+    exit 0
+  fi
+  echo "reclaim-zombie-agent: restart completed but agent still inactive - marking Unhealthy"
+else
+  echo "reclaim-zombie-agent: restart failed - marking Unhealthy"
+fi
+
 aws autoscaling set-instance-health \
   --instance-id "${instance_id}" \
   --region "${region}" \
