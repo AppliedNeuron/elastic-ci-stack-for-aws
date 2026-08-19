@@ -88,11 +88,12 @@ if ((inactive_for < DEBOUNCE_SECONDS)); then
   exit 0
 fi
 
+# TTL covers pre-start IMDS gate + start/grace + post-start IMDS gate/retries.
 token=$(
   curl \
     --fail --silent --show-error \
     -X PUT \
-    -H "X-aws-ec2-metadata-token-ttl-seconds: 60" \
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 180" \
     --location "http://169.254.169.254/latest/api/token"
 )
 instance_id=$(
@@ -113,24 +114,26 @@ if systemctl is-active --quiet buildkite-agent; then
   exit 0
 fi
 
-echo "reclaim-zombie-agent: agent inactive ${inactive_for}s - attempting restart"
-# Conditional so a failed restart does not trip the ERR fail-safe no-op.
-if systemctl restart buildkite-agent; then
-  sleep "${RESTART_GRACE_SECONDS}"
-  if systemctl is-active --quiet buildkite-agent; then
-    echo "reclaim-zombie-agent: restart restored agent - keeping instance"
-    exit 0
-  fi
-  echo "reclaim-zombie-agent: restart completed but agent still inactive"
-else
-  echo "reclaim-zombie-agent: restart failed"
-fi
-
-# Re-check after restart/grace via IMDS target state: if ASG is moving this
-# instance to the warm pool, target leaves InService before current does.
+# Skip start if ASG is already moving us (e.g. warm-pool scale-in).
 require_target_inservice
 
-echo "reclaim-zombie-agent: target still InService after failed restart - marking Unhealthy"
+echo "reclaim-zombie-agent: agent inactive ${inactive_for}s - attempting start"
+systemctl reset-failed buildkite-agent 2>/dev/null || true
+if systemctl start buildkite-agent; then
+  sleep "${RESTART_GRACE_SECONDS}"
+  if systemctl is-active --quiet buildkite-agent; then
+    echo "reclaim-zombie-agent: start restored agent - keeping instance"
+    exit 0
+  fi
+  echo "reclaim-zombie-agent: start completed but agent still inactive"
+else
+  echo "reclaim-zombie-agent: start failed"
+fi
+
+# Re-check after start/grace: scale-in may have begun during the grace window.
+require_target_inservice
+
+echo "reclaim-zombie-agent: target still InService after failed start - marking Unhealthy"
 aws autoscaling set-instance-health \
   --instance-id "${instance_id}" \
   --region "${region}" \
