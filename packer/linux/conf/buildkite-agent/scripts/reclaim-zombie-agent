@@ -1,0 +1,152 @@
+#!/bin/bash
+# Reclaim InService instances whose buildkite-agent has been dead long enough
+# that this is not a normal idle -> warm-pool transition.
+# Prefer starting the agent (keeps local cache) before marking Unhealthy.
+# Fail-safe: any unexpected error exits 0 (no reclaim action).
+
+set -euo pipefail
+
+if [[ $EUID -eq 0 ]]; then
+  exec >>/var/log/elastic-stack.log 2>&1
+fi
+
+# Prefer a longer wait so normal idle → warm-pool transitions (agent stop while
+# still briefly InService) are not mistaken for zombies. A few minutes of
+# automatic queue delay is acceptable vs early restart during scale-in.
+DEBOUNCE_SECONDS=${RECLAIM_ZOMBIE_DEBOUNCE_SECONDS:-300}
+START_GRACE_SECONDS=${RECLAIM_ZOMBIE_START_GRACE_SECONDS:-30}
+
+on_error() {
+  echo "reclaim-zombie-agent: error on line ${1:-?} - no-op" >&2
+  exit 0
+}
+trap 'on_error $LINENO' ERR
+
+# Prefer IMDS target lifecycle (where ASG is sending us). On transient IMDS
+# failure, retry; if still unavailable, fall back to Describe current state.
+# See: https://docs.aws.amazon.com/autoscaling/ec2/userguide/retrieving-target-lifecycle-state-through-imds.html
+IMDS_TARGET_RETRIES=${RECLAIM_ZOMBIE_IMDS_RETRIES:-3}
+IMDS_TARGET_RETRY_SLEEP_SECONDS=${RECLAIM_ZOMBIE_IMDS_RETRY_SLEEP_SECONDS:-2}
+
+require_target_inservice() {
+  local target attempt lifecycle
+
+  for attempt in $(seq 1 "${IMDS_TARGET_RETRIES}"); do
+    if target=$(
+      curl \
+        --fail --silent --show-error \
+        --connect-timeout 2 \
+        --max-time 5 \
+        -H "X-aws-ec2-metadata-token: ${token}" \
+        --location "http://169.254.169.254/latest/meta-data/autoscaling/target-lifecycle-state"
+    ); then
+      if [[ "${target}" != "InService" ]]; then
+        echo "reclaim-zombie-agent: target-lifecycle-state=${target} - no-op"
+        exit 0
+      fi
+      return 0
+    fi
+    echo "reclaim-zombie-agent: target-lifecycle-state fetch failed (attempt ${attempt}/${IMDS_TARGET_RETRIES})"
+    if ((attempt < IMDS_TARGET_RETRIES)); then
+      sleep "${IMDS_TARGET_RETRY_SLEEP_SECONDS}"
+    fi
+  done
+
+  echo "reclaim-zombie-agent: target-lifecycle-state unavailable - falling back to Describe LifecycleState"
+  # Conditional so a Describe failure does not trip the ERR fail-safe before we no-op.
+  if ! lifecycle=$(
+    aws autoscaling describe-auto-scaling-instances \
+      --instance-ids "${instance_id}" \
+      --region "${region}" \
+      --query "AutoScalingInstances[0].LifecycleState" \
+      --output text
+  ); then
+    echo "reclaim-zombie-agent: Describe LifecycleState failed - no-op"
+    exit 0
+  fi
+  if [[ "${lifecycle}" != "InService" ]]; then
+    echo "reclaim-zombie-agent: LifecycleState=${lifecycle} - no-op"
+    exit 0
+  fi
+}
+
+if systemctl is-active --quiet buildkite-agent; then
+  exit 0
+fi
+
+inactive_at=$(systemctl show buildkite-agent -p InactiveEnterTimestamp --value)
+if [[ -z "${inactive_at}" || "${inactive_at}" == "n/a" ]]; then
+  echo "reclaim-zombie-agent: inactive timestamp unavailable - no-op"
+  exit 0
+fi
+
+inactive_epoch=$(date -d "${inactive_at}" +%s)
+now_epoch=$(date +%s)
+inactive_for=$((now_epoch - inactive_epoch))
+if ((inactive_for < DEBOUNCE_SECONDS)); then
+  echo "reclaim-zombie-agent: inactive ${inactive_for}s < ${DEBOUNCE_SECONDS}s debounce - no-op"
+  exit 0
+fi
+
+# TTL 180s: above upstream elastic-ci-stack helpers (120s) for dual IMDS gates
+# + start/grace; still well under IMDSv2 max (21600).
+token=$(
+  curl \
+    --fail --silent --show-error \
+    --connect-timeout 2 \
+    --max-time 5 \
+    -X PUT \
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 180" \
+    --location "http://169.254.169.254/latest/api/token"
+)
+instance_id=$(
+  curl \
+    --fail --silent --show-error \
+    --connect-timeout 2 \
+    --max-time 5 \
+    -H "X-aws-ec2-metadata-token: ${token}" \
+    --location "http://169.254.169.254/latest/meta-data/instance-id"
+)
+region=$(
+  curl \
+    --fail --silent --show-error \
+    --connect-timeout 2 \
+    --max-time 5 \
+    -H "X-aws-ec2-metadata-token: ${token}" \
+    --location "http://169.254.169.254/latest/meta-data/placement/region"
+)
+
+# Agent may have come back between checks
+if systemctl is-active --quiet buildkite-agent; then
+  exit 0
+fi
+
+# Skip start if ASG is already moving us (e.g. warm-pool scale-in).
+require_target_inservice
+
+echo "reclaim-zombie-agent: agent inactive ${inactive_for}s - attempting start"
+systemctl reset-failed buildkite-agent 2>/dev/null || true
+if systemctl start buildkite-agent; then
+  sleep "${START_GRACE_SECONDS}"
+  if systemctl is-active --quiet buildkite-agent; then
+    echo "reclaim-zombie-agent: start restored agent - keeping instance"
+    exit 0
+  fi
+  echo "reclaim-zombie-agent: start completed but agent still inactive"
+else
+  echo "reclaim-zombie-agent: start failed"
+fi
+
+# Re-check after start/grace: scale-in may have begun during the grace window.
+require_target_inservice
+
+if systemctl is-active --quiet buildkite-agent; then
+  echo "reclaim-zombie-agent: agent became active before Unhealthy - keeping instance"
+  exit 0
+fi
+
+echo "reclaim-zombie-agent: target still InService after failed start - marking Unhealthy"
+aws autoscaling set-instance-health \
+  --instance-id "${instance_id}" \
+  --region "${region}" \
+  --health-status Unhealthy

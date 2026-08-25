@@ -58,6 +58,8 @@ sudo chown -R buildkite-agent: /var/lib/buildkite-agent/plugins
 
 echo "Adding systemd service template..."
 sudo cp /tmp/conf/buildkite-agent/systemd/buildkite-agent.service /etc/systemd/system/buildkite-agent.service
+sudo cp /tmp/conf/buildkite-agent/systemd/reclaim-zombie-agent.service /etc/systemd/system/reclaim-zombie-agent.service
+sudo cp /tmp/conf/buildkite-agent/systemd/reclaim-zombie-agent.timer /etc/systemd/system/reclaim-zombie-agent.timer
 
 echo "Adding cloud-init failure safety check..."
 sudo mkdir -p /etc/systemd/system/cloud-final.service.d/
@@ -66,6 +68,8 @@ sudo cp /tmp/conf/buildkite-agent/systemd/cloud-final.service.d/10-power-off-on-
 echo "Adding termination scripts..."
 sudo cp /tmp/conf/buildkite-agent/scripts/stop-agent-gracefully /usr/local/bin/stop-agent-gracefully
 sudo cp /tmp/conf/buildkite-agent/scripts/terminate-instance /usr/local/bin/terminate-instance
+sudo cp /tmp/conf/buildkite-agent/scripts/reclaim-zombie-agent /usr/local/bin/reclaim-zombie-agent
+sudo chmod +x /usr/local/bin/reclaim-zombie-agent
 
 echo "Copying built-in plugins..."
 sudo mkdir -p /usr/local/buildkite-aws-stack/plugins
