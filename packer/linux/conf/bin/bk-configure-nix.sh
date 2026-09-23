@@ -8,7 +8,7 @@ set -euo pipefail
 NETRC_CUSTOM=/etc/determinate/netrc.custom
 CONFIG=/etc/determinate/config.json
 CUSTOM_CONF=/etc/nix/nix.custom.conf
-JFROG_SECRET_ID="${JFROG_SECRET_ID:-avp/jfrog/read_only_token}"
+JFROG_SECRET_ID="${JFROG_SECRET_ID:-arn:aws:secretsmanager:us-west-2:697896076420:secret:avp/jfrog/read_only_token-9g0sAL}"
 JFROG_SECRET_REGION="${JFROG_SECRET_REGION:-us-west-2}"
 
 [[ -f "${CUSTOM_CONF}" ]] || {
