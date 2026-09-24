@@ -426,6 +426,11 @@ EOF
 echo Reloading systemctl services...
 systemctl daemon-reload
 
+if [[ -x /usr/local/bin/bk-configure-nix.sh ]]; then
+  echo Configuring Nix caches...
+  /usr/local/bin/bk-configure-nix.sh
+fi
+
 echo Enabling reclaim-zombie-agent timer...
 systemctl enable reclaim-zombie-agent.timer
 

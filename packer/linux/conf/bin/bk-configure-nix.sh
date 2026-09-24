@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Point the host Determinate Nix daemon at the Artifactory Nix caches.
+#
+# Run at instance boot (not AMI bake) so the JFrog token is not snapshotted
+# into the AMI. Safe to re-run after the token rotates.
+set -euo pipefail
+
+NETRC_CUSTOM=/etc/determinate/netrc.custom
+CONFIG=/etc/determinate/config.json
+CUSTOM_CONF=/etc/nix/nix.custom.conf
+JFROG_SECRET_ID="${JFROG_SECRET_ID:-arn:aws:secretsmanager:us-west-2:697896076420:secret:avp/jfrog/read_only_token}"
+JFROG_SECRET_REGION="${JFROG_SECRET_REGION:-us-west-2}"
+
+[[ -f "${CUSTOM_CONF}" ]] || {
+  echo "error: ${CUSTOM_CONF} not found; install Determinate Nix first" >&2
+  exit 1
+}
+
+if ! grep -q appliedintuition.jfrog.io "${CUSTOM_CONF}"; then
+  echo "Configuring Artifactory Nix substituters..."
+  sudo tee -a "${CUSTOM_CONF}" >/dev/null <<'EOF'
+extra-substituters = https://appliedintuition.jfrog.io/artifactory/api/nix/vos-test-nix-local?priority=1 https://appliedintuition.jfrog.io/artifactory/api/nix/shared-nix-central?priority=10
+extra-trusted-public-keys = hephaestus-nix-cache-1:JvQt+Dxz1gl1rrPDzDaWSHk7zEgN7LreXX8ZsA9qHqY=
+EOF
+fi
+
+echo "Fetching JFrog read-only token from Secrets Manager..."
+secret_string=""
+if ! secret_string=$(aws secretsmanager get-secret-value \
+  --secret-id "${JFROG_SECRET_ID}" \
+  --region "${JFROG_SECRET_REGION}" \
+  --query SecretString \
+  --output text 2>/dev/null); then
+  echo "warning: could not read ${JFROG_SECRET_ID}; skipping Nix netrc setup"
+  secret_string=""
+fi
+
+token=""
+if [[ -n "${secret_string}" ]]; then
+  if parsed=$(jq -er '.jfrog_token' <<<"${secret_string}" 2>/dev/null); then
+    token="${parsed}"
+  else
+    token="${secret_string}"
+  fi
+fi
+
+if [[ -n "${token}" ]]; then
+  sudo install -d -m 0755 /etc/determinate
+  printf 'machine appliedintuition.jfrog.io\nlogin read_only_user\npassword %s\n' "${token}" \
+    | sudo tee "${NETRC_CUSTOM}" >/dev/null
+  sudo chmod 0600 "${NETRC_CUSTOM}"
+
+  existing="{}"
+  if [[ -s "${CONFIG}" ]]; then
+    existing=$(sudo cat "${CONFIG}")
+  fi
+  printf '%s\n' "${existing}" | jq --arg path "${NETRC_CUSTOM}" '
+    .authentication.additionalNetrcSources =
+      ((.authentication.additionalNetrcSources // []) + [$path] | unique)
+  ' | sudo tee "${CONFIG}" >/dev/null
+else
+  echo "warning: no JFrog token available; Artifactory substituters will be unauthenticated"
+fi
+
+sudo systemctl restart nix-daemon.service
+echo "Nix substituters: $(nix config show substituters)"
