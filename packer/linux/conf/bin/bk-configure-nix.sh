@@ -8,7 +8,7 @@ set -euo pipefail
 NETRC_CUSTOM=/etc/determinate/netrc.custom
 CONFIG=/etc/determinate/config.json
 CUSTOM_CONF=/etc/nix/nix.custom.conf
-JFROG_SECRET_ID="${JFROG_SECRET_ID:-arn:aws:secretsmanager:us-west-2:697896076420:secret:avp/jfrog/read_only_token-9g0sAL}"
+JFROG_SECRET_ID="${JFROG_SECRET_ID:-arn:aws:secretsmanager:us-west-2:697896076420:secret:avp/jfrog/read_only_token}"
 JFROG_SECRET_REGION="${JFROG_SECRET_REGION:-us-west-2}"
 
 [[ -f "${CUSTOM_CONF}" ]] || {
@@ -50,17 +50,14 @@ if [[ -n "${token}" ]]; then
     | sudo tee "${NETRC_CUSTOM}" >/dev/null
   sudo chmod 0600 "${NETRC_CUSTOM}"
 
-  if [[ ! -s "${CONFIG}" ]]; then
-    sudo tee "${CONFIG}" >/dev/null <<EOF
-{
-  "authentication": {
-    "additionalNetrcSources": ["${NETRC_CUSTOM}"]
-  }
-}
-EOF
-  elif ! grep -q "${NETRC_CUSTOM}" "${CONFIG}"; then
-    echo "warning: ${CONFIG} exists without ${NETRC_CUSTOM}; not overwriting"
+  existing="{}"
+  if [[ -s "${CONFIG}" ]]; then
+    existing=$(sudo cat "${CONFIG}")
   fi
+  printf '%s\n' "${existing}" | jq --arg path "${NETRC_CUSTOM}" '
+    .authentication.additionalNetrcSources =
+      ((.authentication.additionalNetrcSources // []) + [$path] | unique)
+  ' | sudo tee "${CONFIG}" >/dev/null
 else
   echo "warning: no JFrog token available; Artifactory substituters will be unauthenticated"
 fi
